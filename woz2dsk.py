@@ -228,17 +228,16 @@ class Track:
     def sectors(self) -> Dict[int, Optional[Sector]]:
         sectors = {}
         while True:
-            sector_num = None
+            sector = None
             try:
                 sector = self.next_sector()
                 sector_num = sector.sector_num
-                sectors[sector_num] = sector
             except SectorException as e:
                 print(e)
                 sector_num = e.sector
-                sectors[sector_num] = None
             if sector_num in sectors:
                 break
+            sectors[sector_num] = sector
 
         return sectors
 
