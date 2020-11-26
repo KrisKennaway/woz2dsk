@@ -276,12 +276,14 @@ def main(argv):
         woz_image = wozardry.WozDiskImage(fp)
 
     disk = Disk(woz_image)
+    errors = False
     with open(argv[2], "wb") as fp:
         for track_num in range(35):
             track = disk.seek(track_num)
             if not track:
                 print("Track %d missing" % track_num)
                 sectors = {}
+                errors = True
             else:
                 sectors = track.sectors()
                 missing_sectors = set(range(16)) - set(sectors.keys())
@@ -289,11 +291,16 @@ def main(argv):
                     print("Track %d: missing sectors: %s" % (
                         track_num, " ".join(
                             str(s) for s in sorted(list(missing_sectors)))))
+                    errors = True
             for sector_num in Sector.DOS_33_ORDER:
-                sector = sectors.get(sector_num) or Sector(None, track_num,
-                                                           sector_num)
+                sector = sectors.get(sector_num)
+                if not sector:
+                    sector = Sector(None, track_num, sector_num)
+                    errors = True
                 fp.write(sector.data)
 
+    if errors:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main(sys.argv)
