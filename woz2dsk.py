@@ -1,5 +1,5 @@
 import sys
-from typing import Dict, List, Optional, Tuple, Iterator
+from typing import Dict, Optional, Tuple
 
 import wozardry
 
@@ -74,6 +74,16 @@ class DataPrologueNotFound(DiskException):
                 (self.track, self.sector))
 
 
+class DataEpilogueNotFound(DiskException):
+    def __init__(self, track: int, sector: int):
+        self.track = track
+        self.sector = sector
+
+    def __str__(self):
+        return ("Data epilogue field not found for track %02x sector %02x" %
+                (self.track, self.sector))
+
+
 def decode_44(xx: int, yy: int) -> int:
     return ((xx & 0b01010101) << 1) + (yy & 0b01010101)
 
@@ -91,43 +101,39 @@ ENCODE_62 = [0x96, 0x97, 0x9a, 0x9b, 0x9d, 0x9e, 0x9f, 0xa6, 0xa7,
 DECODE_62_MAP = dict((v, k) for k, v in enumerate(ENCODE_62))
 
 
-# XXX inline
-def decode_62(nibbles: bytearray) -> bytearray:
-    output = bytearray()
-    for n in nibbles:
-        data = DECODE_62_MAP[n]
-        output.append(data)
-    return output
-
-
 def swap_bits(bits):
     return ((bits & 0b1) << 1) ^ ((bits & 0b10) >> 1)
 
-def post_nibble_62(data: bytearray) -> Tuple[bytearray, int]:
+
+def decode_62(data: bytearray) -> Tuple[bytearray, int]:
     assert len(data) == 342, len(data)
     output = bytearray(256)
 
     running_checksum = 0x00
-    for idx in range(85, -1, -1):
-        running_checksum ^= data[idx]
+    for idx, bits6 in enumerate(data[:86]):
+        running_checksum ^= DECODE_62_MAP[bits6]
+
         low2 = (running_checksum >> 0) & 0b11
-        output[85 - idx] ^= swap_bits(low2)
+        output[idx] ^= swap_bits(low2)
 
         mid2 = (running_checksum >> 2) & 0b11
-        output[(85 - idx) + 86] ^= swap_bits(mid2)
+        output[idx + 86] ^= swap_bits(mid2)
 
-        if idx > 1:
+        if idx < 84:
             hi2 = (running_checksum >> 4) & 0b11
-            output[(85 - idx) + 86 * 2] ^= swap_bits(hi2)
+            output[idx + 86 * 2] ^= swap_bits(hi2)
 
     for idx, bits6 in enumerate(data[86:]):
-        running_checksum ^= bits6
-        output[idx - 86] ^= running_checksum << 2
+        running_checksum ^= DECODE_62_MAP[bits6]
+        output[idx] ^= running_checksum << 2
 
     return output, running_checksum
 
 
 class Sector:
+    DOS_33_ORDER = [0x0, 0xd, 0xb, 0x9, 0x7, 0x5, 0x3, 0x1, 0xe, 0xc, 0xa, 0x8,
+                    0x6, 0x4, 0x2, 0xf]
+
     def __init__(self, data: Optional[bytearray] = None):
         if data and len(data) != 256:
             raise ValueError("Sector data is %d bytes != 256" % len(data))
@@ -154,7 +160,6 @@ class Track:
         while cnt < num_nibbles:
             del seen[0]
             seen.append(next(self.track.nibble()))
-            # print(seen), list(sequence)
             if tuple(seen) == tuple(sequence):
                 return True
             cnt += 1
@@ -175,7 +180,6 @@ class Track:
 
             if sector_num in sectors:
                 return sectors
-            # print("Found sector %d" % sector_num)
 
             checksum = decode_44(next(self.track.nibble()),
                                  next(self.track.nibble()))
@@ -183,8 +187,10 @@ class Track:
             if checksum != expected_checksum:
                 raise AddressChecksumMismatch(self.track_num, sector_num)
 
-            if not self.find_within(self.address_epilogue, 3):
+            if not self.find_within(self.address_epilogue[:2], 2):
                 raise AddressEpilogueNotFound(self.track_num, sector_num)
+            # Skip last epilogue nibble since it's often not written completely
+            _ = next(self.track.nibble())
 
             # Find next sync byte
             if not self.find_within(bytes([0xff]), 20):
@@ -196,15 +202,14 @@ class Track:
             nibbles = bytearray()
             for _ in range(342):
                 nibbles.append(next(self.track.nibble()))
-            decoded, checksum = post_nibble_62(decode_62(nibbles))
+            decoded, checksum = decode_62(nibbles)
 
             expected_checksum = DECODE_62_MAP[next(self.track.nibble())]
             if checksum != expected_checksum:
                 raise DataChecksumMismatch(self.track_num, sector_num)
 
-            for e in self.data_epilogue[:2]:
-                val = next(self.track.nibble())
-                assert val == e, hex(val)
+            if not self.find_within(self.data_epilogue[:2], 2):
+                raise DataEpilogueNotFound(self.track_num, sector_num)
             # Skip last epilogue nibble since it's often not written completely
             _ = next(self.track.nibble())
 
@@ -228,22 +233,9 @@ class Disk:
                      self.data_prologue, self.data_epilogue)
 
 
-# TODO: move into Sector
-DOS_33_SECTOR_ORDER = [0x0, 0xd, 0xb, 0x9, 0x7, 0x5, 0x3, 0x1, 0xe, 0xc, 0xa,
-                       0x8, 0x6, 0x4, 0x2, 0xf]
-DOS_33_SECTOR_MAPPING = [0] * len(DOS_33_SECTOR_ORDER)
-for i, s in enumerate(DOS_33_SECTOR_ORDER):
-    DOS_33_SECTOR_MAPPING[s] = i
-
-
 def main(argv):
     if len(argv) != 3:
         raise ValueError("woz2dsk.py <file.woz> <output.dsk>")
-    # dummy, cx = decode_62(bytearray([0xff for _ in range(342)]))
-    # res = post_nibble_62(dummy)
-    # for idx, r in enumerate(res):
-    #     if r != 0xff:
-    #         print(idx, bin(r))
 
     with open(argv[1], "rb") as fp:
         woz_image = wozardry.WozDiskImage(fp)
@@ -252,15 +244,14 @@ def main(argv):
     expected_sectors = set(range(16))
     with open(argv[2], "wb") as fp:
         for track_num in range(35):
-            print("Track %d" % track_num)
             track = disk.seek(track_num)
             sectors = track.sectors()
             if set(sectors.keys()) != expected_sectors:
                 print(
-                    "Sectors missing: %s" % sorted(list(expected_sectors - set(
-                        sectors.keys()))))
+                    "Track %d: Sectors missing: %s" % (track_num, sorted(list(
+                        expected_sectors - set(sectors.keys())))))
 
-            for sector_num in DOS_33_SECTOR_ORDER:
+            for sector_num in Sector.DOS_33_ORDER:
                 sector = sectors.get(sector_num, Sector())
                 fp.write(sector.data)
 
