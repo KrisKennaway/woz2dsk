@@ -1,12 +1,12 @@
 import sys
-from typing import Dict, Optional, Tuple, Iterable
+from typing import Dict, Optional, Tuple
 
 import wozardry
 
-DEFAULT_ADDRESS_PROLOGUE = bytes.fromhex("D5 AA 96")
-DEFAULT_ADDRESS_EPILOGUE = bytes.fromhex("DE AA EB")
-DEFAULT_DATA_PROLOGUE = bytes.fromhex("D5 AA AD")
-DEFAULT_DATA_EPILOGUE = bytes.fromhex("DE AA EB")
+DEFAULT_ADDRESS_PROLOGUE = bytes([0xd5, 0xaa, 0x96])
+DEFAULT_ADDRESS_EPILOGUE = bytes([0xde, 0xaa, 0xeb])
+DEFAULT_DATA_PROLOGUE = bytes([0xd5, 0xaa, 0xad])
+DEFAULT_DATA_EPILOGUE = bytes([0xde, 0xaa, 0xeb])
 
 
 class DiskException(Exception):
@@ -199,6 +199,11 @@ class Track:
         _ = next(self.track.nibble())
 
         # Find next sync byte
+        #
+        # The magic tolerance value of 20 nibbles here and below were chosen
+        # semi-arbitrarily: they should be larger than any reasonable sector gap
+        # but not so large that we'd possibly skip into the next sector if this
+        # one is corrupt.
         if not self.find_within(bytes([0xff]), 20):
             raise DataSyncBytesNotFound(self.track_num, sector_num)
 
@@ -282,8 +287,8 @@ def main(argv):
                 missing_sectors = set(range(16)) - set(sectors.keys())
                 if missing_sectors:
                     print("Track %d: missing sectors: %s" % (
-                        track_num,
-                        " ".join(str(s) for s in sorted(list(missing_sectors)))))
+                        track_num, " ".join(
+                            str(s) for s in sorted(list(missing_sectors)))))
             for sector_num in Sector.DOS_33_ORDER:
                 sector = sectors.get(sector_num) or Sector(None, track_num,
                                                            sector_num)
