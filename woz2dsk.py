@@ -1,5 +1,5 @@
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Iterable
 
 import wozardry
 
@@ -13,75 +13,70 @@ class DiskException(Exception):
     pass
 
 
-class TrackMismatch(DiskException):
-    def __init__(self, track_found: int, track_expected: int, sector: int):
+class SectorException(DiskException):
+    def __init__(self, track: int, sector: int):
+        self.track = track
+        self.sector = sector
+
+
+class TrackMismatch(SectorException):
+    def __init__(self, track: int, track_found: int, sector: int):
+        super(TrackMismatch, self).__init__(track, sector)
         self.track_found = track_found
-        self.track_expected = track_expected
-        self.sector = sector
 
     def __str__(self):
-        return ("Track mismatch for track %02x (!= %02x) sector %02x" %
-                (self.track_found, self.track_expected, self.sector))
+        return ("Track %02d sector %02d has mismatched track value: %02d" %
+                (self.track, self.sector, self.track_found))
 
 
-class AddressChecksumMismatch(DiskException):
-    def __init__(self, track: int, sector: int):
-        self.track = track
-        self.sector = sector
-
+class AddressChecksumMismatch(SectorException):
     def __str__(self):
-        return ("Address checksum mismatch for track %02x sector %02x" %
+        return ("Track %02d sector %02d has mismatched address checksum" %
                 (self.track, self.sector))
 
 
-class AddressEpilogueNotFound(DiskException):
-    def __init__(self, track: int, sector: int):
-        self.track = track
-        self.sector = sector
-
+class AddressEpilogueNotFound(SectorException):
     def __str__(self):
-        return ("Address epilogue field not found for track %02x sector %02x" %
+        return ("Track %02d sector %02d has missing address epilogue field" %
                 (self.track, self.sector))
 
 
-class DataChecksumMismatch(DiskException):
-    def __init__(self, track: int, sector: int):
-        self.track = track
-        self.sector = sector
-
+class DataChecksumMismatch(SectorException):
     def __str__(self):
-        return ("Data checksum mismatch for track %02x sector %02x" %
+        return ("Track %02d sector %02d has mismatched data checksum" %
                 (self.track, self.sector))
 
 
-class DataSyncBytesNotFound(DiskException):
-    def __init__(self, track: int, sector: int):
-        self.track = track
-        self.sector = sector
-
+class DataSyncBytesNotFound(SectorException):
     def __str__(self):
-        return ("Data sync bytes not found for track %02x sector %02x" %
+        return ("Track %02d sector %02d has missing data sync bytes" %
                 (self.track, self.sector))
 
 
-class DataPrologueNotFound(DiskException):
-    def __init__(self, track: int, sector: int):
-        self.track = track
-        self.sector = sector
-
+class DataPrologueNotFound(SectorException):
     def __str__(self):
-        return ("Data prologue field not found for track %02x sector %02x" %
+        return ("Track %02d sector %02d has missing data prologue field" %
                 (self.track, self.sector))
 
 
-class DataEpilogueNotFound(DiskException):
-    def __init__(self, track: int, sector: int):
-        self.track = track
-        self.sector = sector
+class DataEpilogueNotFound(SectorException):
+    def __str__(self):
+        return ("Track %02d sector %02d has missing data epilogue field" %
+                (self.track, self.sector))
+
+
+class InvalidDataNibble(DiskException):
+    def __init__(self, nibble: int):
+        self.nibble = nibble
 
     def __str__(self):
-        return ("Data epilogue field not found for track %02x sector %02x" %
-                (self.track, self.sector))
+        return "Invalid data nibble value: %02x" % self.nibble
+
+
+class BadData(SectorException):
+    def __str__(self):
+        return ("Track %02d sector %02d contains invalid data nibble(s)" % (
+            self.track, self.sector))
 
 
 def decode_44(xx: int, yy: int) -> int:
@@ -105,13 +100,20 @@ def swap_bits(bits):
     return ((bits & 0b1) << 1) ^ ((bits & 0b10) >> 1)
 
 
+def decode_62_nibble(nibble: int) -> int:
+    try:
+        return DECODE_62_MAP[nibble]
+    except KeyError:
+        raise InvalidDataNibble(nibble)
+
+
 def decode_62(data: bytearray) -> Tuple[bytearray, int]:
     assert len(data) == 342, len(data)
     output = bytearray(256)
 
     running_checksum = 0x00
-    for idx, bits6 in enumerate(data[:86]):
-        running_checksum ^= DECODE_62_MAP[bits6]
+    for idx, nibble in enumerate(data[:86]):
+        running_checksum ^= decode_62_nibble(nibble)
 
         low2 = (running_checksum >> 0) & 0b11
         output[idx] ^= swap_bits(low2)
@@ -123,8 +125,8 @@ def decode_62(data: bytearray) -> Tuple[bytearray, int]:
             hi2 = (running_checksum >> 4) & 0b11
             output[idx + 86 * 2] ^= swap_bits(hi2)
 
-    for idx, bits6 in enumerate(data[86:]):
-        running_checksum ^= DECODE_62_MAP[bits6]
+    for idx, nibble in enumerate(data[86:]):
+        running_checksum ^= decode_62_nibble(nibble)
         output[idx] ^= running_checksum << 2
 
     return output, running_checksum
@@ -134,9 +136,18 @@ class Sector:
     DOS_33_ORDER = [0x0, 0xd, 0xb, 0x9, 0x7, 0x5, 0x3, 0x1, 0xe, 0xc, 0xa, 0x8,
                     0x6, 0x4, 0x2, 0xf]
 
-    def __init__(self, data: Optional[bytearray] = None):
+    def __init__(
+            self, volume_num: Optional[int],
+            track_num: Optional[int],
+            sector_num: int,
+            data: Optional[bytearray] = None,
+    ):
         if data and len(data) != 256:
             raise ValueError("Sector data is %d bytes != 256" % len(data))
+
+        self.volume_num = volume_num
+        self.track_num = track_num
+        self.sector_num = sector_num
         self.data = data or bytearray(256)
 
 
@@ -165,55 +176,71 @@ class Track:
             cnt += 1
         return False
 
-    def sectors(self) -> Dict[int, Sector]:
+    def next_sector(self) -> Sector:
+        self.track.find(self.address_prologue)
+        volume = decode_44(next(self.track.nibble()),
+                           next(self.track.nibble()))
+        track_num = decode_44(next(self.track.nibble()),
+                              next(self.track.nibble()))
+        sector_num = decode_44(next(self.track.nibble()),
+                               next(self.track.nibble()))
+        if self.track_num != track_num:
+            raise TrackMismatch(track_num, self.track_num, sector_num)
+
+        checksum = decode_44(next(self.track.nibble()),
+                             next(self.track.nibble()))
+        expected_checksum = volume ^ self.track_num ^ sector_num
+        if checksum != expected_checksum:
+            raise AddressChecksumMismatch(self.track_num, sector_num)
+
+        if not self.find_within(self.address_epilogue[:2], 2):
+            raise AddressEpilogueNotFound(self.track_num, sector_num)
+        # Skip last epilogue nibble since it's often not written completely
+        _ = next(self.track.nibble())
+
+        # Find next sync byte
+        if not self.find_within(bytes([0xff]), 20):
+            raise DataSyncBytesNotFound(self.track_num, sector_num)
+
+        if not self.find_within(self.data_prologue, 20):
+            raise DataPrologueNotFound(self.track_num, sector_num)
+
+        nibbles = bytearray()
+        for _ in range(342):
+            nibbles.append(next(self.track.nibble()))
+        try:
+            data, checksum = decode_62(nibbles)
+        except InvalidDataNibble as e:
+            print(e)
+            raise BadData(self.track_num, sector_num)
+
+        expected_checksum = decode_62_nibble(next(self.track.nibble()))
+        if checksum != expected_checksum:
+            raise DataChecksumMismatch(self.track_num, sector_num)
+
+        if not self.find_within(self.data_epilogue[:2], 2):
+            raise DataEpilogueNotFound(self.track_num, sector_num)
+        # Skip last epilogue nibble since it's often not written completely
+        _ = next(self.track.nibble())
+
+        return Sector(volume, track_num, sector_num, data)
+
+    def sectors(self) -> Dict[int, Optional[Sector]]:
         sectors = {}
         while True:
-            self.track.find(self.address_prologue)
-            volume = decode_44(next(self.track.nibble()),
-                               next(self.track.nibble()))
-            track_num = decode_44(next(self.track.nibble()),
-                                  next(self.track.nibble()))
-            sector_num = decode_44(next(self.track.nibble()),
-                                   next(self.track.nibble()))
-            if self.track_num != track_num:
-                raise TrackMismatch(track_num, self.track_num, sector_num)
-
+            sector_num = None
+            try:
+                sector = self.next_sector()
+                sector_num = sector.sector_num
+                sectors[sector_num] = sector
+            except SectorException as e:
+                print(e)
+                sector_num = e.sector
+                sectors[sector_num] = None
             if sector_num in sectors:
-                return sectors
+                break
 
-            checksum = decode_44(next(self.track.nibble()),
-                                 next(self.track.nibble()))
-            expected_checksum = volume ^ self.track_num ^ sector_num
-            if checksum != expected_checksum:
-                raise AddressChecksumMismatch(self.track_num, sector_num)
-
-            if not self.find_within(self.address_epilogue[:2], 2):
-                raise AddressEpilogueNotFound(self.track_num, sector_num)
-            # Skip last epilogue nibble since it's often not written completely
-            _ = next(self.track.nibble())
-
-            # Find next sync byte
-            if not self.find_within(bytes([0xff]), 20):
-                raise DataSyncBytesNotFound(self.track_num, sector_num)
-
-            if not self.find_within(self.data_prologue, 20):
-                raise DataPrologueNotFound(self.track_num, sector_num)
-
-            nibbles = bytearray()
-            for _ in range(342):
-                nibbles.append(next(self.track.nibble()))
-            decoded, checksum = decode_62(nibbles)
-
-            expected_checksum = DECODE_62_MAP[next(self.track.nibble())]
-            if checksum != expected_checksum:
-                raise DataChecksumMismatch(self.track_num, sector_num)
-
-            if not self.find_within(self.data_epilogue[:2], 2):
-                raise DataEpilogueNotFound(self.track_num, sector_num)
-            # Skip last epilogue nibble since it's often not written completely
-            _ = next(self.track.nibble())
-
-            sectors[sector_num] = Sector(decoded)
+        return sectors
 
 
 class Disk:
@@ -227,10 +254,14 @@ class Disk:
         self.data_prologue = data_prologue or DEFAULT_DATA_PROLOGUE
         self.data_epilogue = data_epilogue or DEFAULT_DATA_EPILOGUE
 
-    def seek(self, track_num) -> Track:
-        return Track(track_num, self.woz_image.seek(track_num),
-                     self.address_prologue, self.address_epilogue,
-                     self.data_prologue, self.data_epilogue)
+    def seek(self, track_num) -> Optional[Track]:
+        track_data = self.woz_image.seek(track_num)
+        if track_data:
+            return Track(track_num, track_data,
+                         self.address_prologue, self.address_epilogue,
+                         self.data_prologue, self.data_epilogue)
+        else:
+            return None
 
 
 def main(argv):
@@ -241,18 +272,22 @@ def main(argv):
         woz_image = wozardry.WozDiskImage(fp)
 
     disk = Disk(woz_image)
-    expected_sectors = set(range(16))
     with open(argv[2], "wb") as fp:
         for track_num in range(35):
             track = disk.seek(track_num)
-            sectors = track.sectors()
-            if set(sectors.keys()) != expected_sectors:
-                print(
-                    "Track %d: Sectors missing: %s" % (track_num, sorted(list(
-                        expected_sectors - set(sectors.keys())))))
-
+            if not track:
+                print("Track %d missing" % track_num)
+                sectors = {}
+            else:
+                sectors = track.sectors()
+                missing_sectors = set(range(16)) - set(sectors.keys())
+                if missing_sectors:
+                    print("Track %d: missing sectors: %s" % (
+                        track_num,
+                        " ".join(str(s) for s in sorted(list(missing_sectors)))))
             for sector_num in Sector.DOS_33_ORDER:
-                sector = sectors.get(sector_num, Sector())
+                sector = sectors.get(sector_num) or Sector(None, track_num,
+                                                           sector_num)
                 fp.write(sector.data)
 
 
