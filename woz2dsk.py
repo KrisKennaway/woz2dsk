@@ -281,14 +281,14 @@ def main(argv):
         for track_num in range(35):
             track = disk.seek(track_num)
             if not track:
-                print("Track %d missing" % track_num)
+                print("Track %02d missing" % track_num)
                 sectors = {}
                 errors = True
             else:
                 sectors = track.sectors()
                 missing_sectors = set(range(16)) - set(sectors.keys())
                 if missing_sectors:
-                    print("Track %d: missing sectors: %s" % (
+                    print("Track %02d: missing sectors: %s" % (
                         track_num, " ".join(
                             str(s) for s in sorted(list(missing_sectors)))))
                     errors = True
