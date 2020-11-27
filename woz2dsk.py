@@ -185,7 +185,7 @@ class Track:
         sector_num = decode_44(next(self.track.nibble()),
                                next(self.track.nibble()))
         if self.track_num != track_num:
-            raise TrackMismatch(track_num, self.track_num, sector_num)
+            raise TrackMismatch(self.track_num, track_num, sector_num)
 
         checksum = decode_44(next(self.track.nibble()),
                              next(self.track.nibble()))
