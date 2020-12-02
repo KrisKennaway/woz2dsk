@@ -53,12 +53,6 @@ class DataChecksumMismatch(SectorException):
                 (self.track, self.sector))
 
 
-class DataSyncBytesNotFound(SectorException):
-    def __str__(self):
-        return ("Track %02d sector %02d has missing data sync bytes" %
-                (self.track, self.sector))
-
-
 class DataPrologueNotFound(SectorException):
     def __str__(self):
         return ("Track %02d sector %02d has missing data prologue field" %
@@ -211,15 +205,14 @@ class Track:
         # Skip last epilogue nibble since it's often not written completely
         _ = next(self.track.nibble())
 
-        # Find next sync byte
+        # Don't bother matching explicitly for the sync bytes before the data
+        # prologue.  If they're corrupt then physical hardware may not be able
+        # to read the disk, but we still can.
         #
-        # The magic tolerance value of 20 nibbles here and below were chosen
+        # The magic tolerance value of 20 nibbles here was chosen
         # semi-arbitrarily: they should be larger than any reasonable sector gap
         # but not so large that we'd possibly skip into the next sector if this
         # one is corrupt.
-        if not self.find_within(bytes([0xff]), 20):
-            raise DataSyncBytesNotFound(self.track_num, sector_num)
-
         if not self.find_within(self.data_prologue, 20):
             raise DataPrologueNotFound(self.track_num, sector_num)
 
@@ -236,7 +229,7 @@ class Track:
             expected_checksum = decode_62_nibble(next(self.track.nibble()))
         except InvalidNibble as e:
             # TODO: the data is still possibly correct even though we can't
-            # verify the checksum, so optionally allow it.
+            #  verify the checksum, so optionally allow it.
             print(e)
             raise UnverifiableChecksum(self.track_num, sector_num)
         if checksum != expected_checksum:
