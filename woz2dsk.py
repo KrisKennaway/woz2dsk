@@ -41,6 +41,12 @@ class AddressEpilogueNotFound(SectorException):
                 (self.track, self.sector))
 
 
+class DuplicateSector(SectorException):
+    def __str__(self):
+        return ("Track %02d sector %02d is duplicated" % (
+            self.track, self.sector))
+
+
 class DataChecksumMismatch(SectorException):
     def __str__(self):
         return ("Track %02d sector %02d has mismatched data checksum" %
@@ -65,18 +71,25 @@ class DataEpilogueNotFound(SectorException):
                 (self.track, self.sector))
 
 
-class InvalidDataNibble(DiskException):
+class InvalidNibble(DiskException):
     def __init__(self, nibble: int):
         self.nibble = nibble
 
     def __str__(self):
-        return "Invalid data nibble value: %02x" % self.nibble
+        return "Invalid nibble value: %02x" % self.nibble
 
 
 class BadData(SectorException):
     def __str__(self):
         return ("Track %02d sector %02d contains invalid data nibble(s)" % (
             self.track, self.sector))
+
+
+class UnverifiableChecksum(SectorException):
+    def __str__(self):
+        return ("Track %02d sector %02d contains invalid checksum nibble ("
+                "data checksum cannot be verified)" % (
+                    self.track, self.sector))
 
 
 def decode_44(xx: int, yy: int) -> int:
@@ -104,7 +117,7 @@ def decode_62_nibble(nibble: int) -> int:
     try:
         return DECODE_62_MAP[nibble]
     except KeyError:
-        raise InvalidDataNibble(nibble)
+        raise InvalidNibble(nibble)
 
 
 def decode_62(data: bytearray) -> Tuple[bytearray, int]:
@@ -215,11 +228,17 @@ class Track:
             nibbles.append(next(self.track.nibble()))
         try:
             data, checksum = decode_62(nibbles)
-        except InvalidDataNibble as e:
+        except InvalidNibble as e:
             print(e)
             raise BadData(self.track_num, sector_num)
 
-        expected_checksum = decode_62_nibble(next(self.track.nibble()))
+        try:
+            expected_checksum = decode_62_nibble(next(self.track.nibble()))
+        except InvalidNibble as e:
+            # TODO: the data is still possibly correct even though we can't
+            # verify the checksum, so optionally allow it.
+            print(e)
+            raise UnverifiableChecksum(self.track_num, sector_num)
         if checksum != expected_checksum:
             raise DataChecksumMismatch(self.track_num, sector_num)
 
@@ -232,6 +251,7 @@ class Track:
 
     def sectors(self) -> Dict[int, Optional[Sector]]:
         sectors = {}
+        bit_indexes = {}
         while True:
             sector = None
             try:
@@ -241,8 +261,14 @@ class Track:
                 print(e)
                 sector_num = e.sector
             if sector_num in sectors:
-                break
-            sectors[sector_num] = sector
+                old_bit_idx = bit_indexes[sector_num]
+                if old_bit_idx == self.track.bit_index:
+                    break
+                else:
+                    print(DuplicateSector(self.track_num, sector_num))
+            else:
+                sectors[sector_num] = sector
+                bit_indexes[sector_num] = self.track.bit_index
 
         return sectors
 
@@ -273,7 +299,11 @@ def main(argv):
         raise ValueError("woz2dsk.py <file.woz> <output.dsk>")
 
     with open(argv[1], "rb") as fp:
-        woz_image = wozardry.WozDiskImage(fp)
+        try:
+            woz_image = wozardry.WozDiskImage(fp)
+        except wozardry.WozError as e:
+            print("Unable to read %s: %s" % (argv[1], e), file=sys.stderr)
+            sys.exit(1)
 
     disk = Disk(woz_image)
     errors = False
@@ -301,6 +331,7 @@ def main(argv):
 
     if errors:
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main(sys.argv)
